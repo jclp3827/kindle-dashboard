@@ -270,6 +270,22 @@ SCHEMA: list = [
         ],
     ),
 
+
+    Section(
+        key="photo", label="电子相册", page="photo",
+        help="从本地/NAS 目录读取照片作为一个页面轮播。填了路径才显示此页。",
+        label_en="Photo Gallery",
+        help_en="Show photos from a local/NAS directory as a page.",
+        enable_when=["path"],
+        fields=[
+            Field("path", "照片目录", "str", "/Volumes/摄影图片",
+                  help="照片根目录，递归读取。", label_en="Photo path"),
+            Field("grayscale", "灰度", "bool", True,
+                  help="墨水屏推荐灰度。", label_en="Grayscale"),
+            Field("interval", "轮播间隔(秒)", "int", 60,
+                  help="每张照片停留多久。", label_en="Interval (s)"),
+        ],
+    ),
     Section(
         key="downloaders", label="下载器", page="download",
         help="接入 qBittorrent / Transmission(可多台),把所有种子合并显示成一屏下载看板。"
@@ -507,11 +523,12 @@ def active_pages(config: dict) -> list:
         "device": enabled.get("devices"),
         "ha": enabled.get("ha_page") and ha_ready,      # 选了实体 + HA 地址/令牌都配好,才出 ha 页
         "printer": enabled.get("printer") and ha_ready, # 打印机也经 HA,同理依赖 HA 有效
-        "news": enabled.get("news"),                    # 订阅源非空即出页(无凭据依赖)
+        "news": enabled.get("news"),
+        "photo": bool((config or {}).get("photo", {}).get("path")),                    # 订阅源非空即出页(无凭据依赖)
         "download": enabled.get("downloaders"),         # 下载器列表非空即出页
         "music": enabled.get("music"),                  # 启用即出页(空状态也显示,无外部凭据依赖)
     }
-    default_order = ["home", "ai", "news", "music", "download", "device", "ha", "printer"]
+    default_order = ["home", "ai", "news", "photo", "music", "download", "device", "ha", "printer"]
     chosen = config.get("display", {}).get("pages") or []
     hidden = config.get("display", {}).get("hidden_pages") or []
     base = chosen if chosen else default_order

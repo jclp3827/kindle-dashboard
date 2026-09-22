@@ -26,7 +26,7 @@ from server.config import schema
 from server.config.loader import ConfigManager
 from server.render import styles, pipeline, contract
 from server.render.build_context import prep_context
-from server.sources import weather, ccusage_cli, homeassistant, metrics, mstodo, rss, downloader, lyrics
+from server.sources import weather, ccusage_cli, homeassistant, metrics, mstodo, rss, downloader, lyrics, apple_music, apple_reminders, codex_quota
 from server.sources.ccusage_merge import merge_all_devices
 from server import actions
 
@@ -91,7 +91,10 @@ SOURCE_INTERVAL = {"weather":       ("weather", "interval", 600),
                    "metrics":       ("devices", "interval", 30),
                    "mstodo":        ("mstodo", "interval", 600),
                    "rss":           ("news", "interval", 1800),
-                   "downloader":    ("downloaders", "interval", 15)}
+                   "downloader":    ("downloaders", "interval", 15),
+                   "apple_music":    ("music", "interval", 10),
+                   "apple_reminders": ("reminders", "interval", 300),
+                   "codex_quota":   ("ai_usage", "codex_quota_interval", 600)}
 # 渲染间隔放在「服务」段
 RENDER_INTERVAL = ("server", "render_interval", 30)
 
@@ -169,9 +172,12 @@ LEGACY_FRAMES_LOCK = threading.Lock()
 RENDER_LOCK = threading.Lock()
 CURRENT = {"style": None}
 page_state = {"i": 0, "last": 0.0}
+KINDLE_PULL = {"last": 0.0, "ip": ""}   # Kindle 最近一次拉帧时间/IP（比 SSH 更可靠的在播证据）
+PAUSED = {"on": False}   # 暂停时：停止所有数据源采集、照片预取/处理与翻页，Kindle 停在当前帧（服务仍可访问）
+CLEAR_CMD = {"on": False, "ts": 0.0}   # 一键清屏指令：设置页点「一键清屏」置位，Kindle 下一次拉帧读到即执行（读后复位）
 legacy_page_state = {"i": 0, "last": 0.0}
 
-SOURCES = (weather, ccusage_cli, homeassistant, metrics, mstodo, rss, downloader)
+SOURCES = (weather, ccusage_cli, homeassistant, metrics, mstodo, rss, downloader, apple_music, apple_reminders, codex_quota)
 CONFIG_SAVE_SYNC_SOURCES = (weather,)
 
 
@@ -684,9 +690,62 @@ def _prune_pull_device_cache(cfg):
                 cur.pop(key, None)
 
 
+def _route_internal_push(data):
+    """内部采集源（apple_music/apple_reminders/codex_quota）返回的推送体，
+    走与外部 push 端点相同的处理逻辑，保证缓存结构一致。"""
+    if not data:
+        return False
+    touched = False
+    if "_push_music" in data:
+        raw = data["_push_music"]
+        try:
+            with cache_lock:
+                prev = cache.get("music") or {}
+                payload = _music_payload(raw, prev)
+                cache["music"] = payload
+            _maybe_fetch_lyrics(payload)
+            try:
+                _atomic_json_write(MUSIC_CACHE, _music_payload_for_disk(payload))
+            except Exception:
+                pass
+            touched = True
+        except Exception as e:
+            print(f"[collect] apple_music payload: {e}")
+    if "_push_apple" in data:
+        raw = data["_push_apple"]
+        try:
+            payload = _apple_payload(raw)
+            with cache_lock:
+                cache["reminders"] = payload["reminders"]
+                cache["apple_updated"] = payload["updated_at"]
+            try:
+                _atomic_json_write(APPLE_REMINDERS_CACHE, payload)
+            except Exception:
+                pass
+            touched = True
+        except Exception as e:
+            print(f"[collect] apple_reminders payload: {e}")
+    if "_push_rate_limits" in data:
+        raw = data["_push_rate_limits"]
+        try:
+            if raw.get("source") == "codex":
+                with cache_lock:
+                    cache["codex_rate_limits"] = raw.get("rate_limits")
+            else:
+                with cache_lock:
+                    cache["rate_limits"] = raw.get("rate_limits")
+            touched = True
+        except Exception as e:
+            print(f"[collect] codex_quota payload: {e}")
+    return touched
+
+
 def collect_source(src, cfg):
     try:
         data = src.collect(cfg)
+        if data and any(k.startswith("_push_") for k in data):
+            ok = _route_internal_push(data)
+            return data if ok else None
         _merge(data)
         return data            # 真拿到数据(非 None/非空)→ 真值;失败/无源 → None/空(供冷启动快速重试判断)
     except Exception as e:
@@ -726,6 +785,8 @@ def render_all(cfg):
     for pk in pages:
         if not styles.has_page(style, pk):
             continue
+        if pk == "photo":
+            continue  # photo页由frame端点动态渲染,不在这里静态渲染
         ctx["page_no"], ctx["page_total"] = _page_meta(cfg, style, pk)
         try:
             html = styles.render_page(style, pk, ctx)
@@ -746,7 +807,7 @@ def render_all(cfg):
     with RENDER_LOCK:
         for pk in new:
             RENDERED[pk] = new[pk]
-        RENDER_ORDER[:] = [p for p in pages if p in RENDERED]
+        RENDER_ORDER[:] = [p for p in pages if p in RENDERED or p == "photo"]
         CURRENT["style"] = style
 
 
@@ -768,6 +829,8 @@ def source_loop(src):
     t0 = time.time()
     got = False
     while True:
+        if PAUSED["on"]:
+            time.sleep(1); continue
         cfg = cm.get()
         if collect_source(src, cfg):
             got = True
@@ -781,6 +844,8 @@ def render_loop():
     """渲染独立线程:按 render 间隔从缓存出图,不受采集快慢影响(时钟永不冻)。
     并负责热重载配置(唯一调 maybe_reload 的线程,避免多线程竞争)。"""
     while True:
+        if PAUSED["on"]:
+            time.sleep(1); continue
         cm.maybe_reload()
         cfg = cm.get()
         try:
@@ -906,8 +971,8 @@ app = FastAPI(lifespan=lifespan)
 # ---------- 访问鉴权:令牌保护设置/配置接口;Kindle 拉图/设备上报/health 豁免 ----------
 from fastapi import Request  # noqa: E402
 
-# 豁免前缀:Kindle 只拉 frame.png / page/*;agent 下发、health、setup 空壳页都放行
-_AUTH_EXEMPT_PREFIXES = ("/kindle/frame.png", "/kindle/page/", "/agent/", "/health", "/setup")
+# 豁免前缀:Kindle 只拉 frame.png / page/* / clear-cmd(清屏指令,Kindle 带不了令牌);agent 下发、health、setup 空壳页都放行
+_AUTH_EXEMPT_PREFIXES = ("/kindle/frame.png", "/kindle/page/", "/kindle/photo.png", "/kindle/clear-cmd", "/agent/", "/health", "/setup")
 # 豁免精确路径:设备主动上报的接口(push 进来,Kindle/agent 调,带不了令牌)
 _AUTH_EXEMPT_EXACT = {"/", "/api/device-metrics", "/api/apple-sync", "/api/music",
                       "/api/rate-limits", "/api/kindle-status", "/api/ccusage",
@@ -954,19 +1019,54 @@ def _legacy_placeholder():
 
 
 @app.get("/kindle/frame.png")
-def kindle_frame():
+def kindle_frame(request: Request = None):
+    KINDLE_PULL["last"] = time.time()
+    try:
+        if request is not None:
+            KINDLE_PULL["ip"] = request.client.host
+    except Exception:
+        pass
     cfg = cm.get()
-    interval = cfg.get("server", {}).get("page_interval", 20)
+    PAGE_DURATIONS = {"photo": 60}
+    default_dur = 10
+    if PAUSED["on"]:
+        # 暂停：冻结当前页，不翻页、不重渲照片、不碰 NAS
+        with RENDER_LOCK:
+            frozen = RENDERED.get("photo_live") if (RENDER_ORDER and RENDER_ORDER[page_state["i"] % len(RENDER_ORDER)] == "photo") else None
+            if not frozen and RENDER_ORDER:
+                frozen = RENDERED.get(RENDER_ORDER[page_state["i"] % len(RENDER_ORDER)])
+        return Response(frozen or _placeholder(), media_type="image/png")
     with RENDER_LOCK:
         order = list(RENDER_ORDER)
         if order:
             now_ts = time.time()
+            cur_page = order[page_state["i"] % len(order)]
+            dur = PAGE_DURATIONS.get(cur_page, default_dur)
             if page_state["last"] == 0.0:
-                page_state["last"] = now_ts          # 首次:停在第 0 页(首页),不立即跳页
-            elif now_ts - page_state["last"] >= interval:
+                page_state["last"] = now_ts
+            elif now_ts - page_state["last"] >= dur:
                 page_state["i"] = (page_state["i"] + 1) % len(order)
                 page_state["last"] = now_ts
-            png = RENDERED.get(order[page_state["i"] % len(order)])
+            cur_page = order[page_state["i"] % len(order)]
+            # 电子相册:20秒换一张,60秒内换3张;缓存渲染结果避免重复渲染
+            if cur_page == "photo":
+                photo_png = RENDERED.get("photo_live")
+                photo_last = page_state.get("photo_last", 0)
+                if not photo_png or now_ts - photo_last >= 20:
+                    from server.render.build_context import _build_photo
+                    from server.render.styles import render_page
+                    photo_data = _build_photo(cfg)
+                    if photo_data.get("data"):
+                        ctx = {"photo": photo_data, "now": time.strftime("%m/%d %H:%M"), "time_hm": time.strftime("%H:%M"), "lang": "zh"}
+                        style = styles.pick_style(cfg)
+                        html = render_page(style, "photo", ctx)
+                        _rc = pipeline.RenderConfig.from_config(cfg)
+                        photo_png = pipeline.render_html_to_png(html, _rc)
+                        RENDERED["photo_live"] = photo_png
+                        page_state["photo_last"] = now_ts
+                png = photo_png or RENDERED.get("photo") or _placeholder()
+            else:
+                png = RENDERED.get(cur_page)
         else:
             png = None
     return Response(png or _placeholder(), media_type="image/png")
@@ -977,6 +1077,23 @@ def kindle_page(page_key: str):
     with RENDER_LOCK:
         png = RENDERED.get(page_key)
     return Response(png or _placeholder(), media_type="image/png")
+
+
+@app.get("/kindle/photo.png")
+def kindle_photo():
+    from server.photo_source import get_photo
+    png = get_photo(advance=True)
+    return Response(png or _placeholder(), media_type="image/png")
+
+
+@app.get("/kindle/clear-cmd")
+def kindle_clear_cmd():
+    """一键清屏指令(供 Kindle 拉帧循环轮询):返回 "1" = 执行清屏(黑闪清屏后全刷重绘当前帧),
+    返回 "0" = 无指令正常拉帧。**读取即复位**(每条指令只执行一次);设了访问令牌也放行
+    (Kindle 拉帧带不了令牌,见 _AUTH_EXEMPT_PREFIXES)。"""
+    on = CLEAR_CMD["on"]
+    CLEAR_CMD["on"] = False
+    return Response("1" if on else "0", media_type="text/plain")
 
 
 def _legacy_render_page(cfg, pk):
@@ -1749,3 +1866,67 @@ def setup_page():
         with open(path, encoding="utf-8") as f:
             return HTMLResponse(f.read())
     return HTMLResponse("<h1>设置页未安装</h1>", status_code=404)
+
+
+# ---------- 系统向导（设置页「系统向导」面板）----------
+from server import systemctl
+
+@app.get("/api/system/status")
+def api_system_status():
+    try:
+        return {"ok": True, "paused": PAUSED["on"], "clear_pending": CLEAR_CMD["on"],
+                **systemctl.status(cm.get())}
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/system/pause")
+def api_system_pause(payload: dict = None):
+    """暂停/恢复。暂停时停止所有数据源采集、照片预取处理与翻页，Kindle 停在当前帧。"""
+    try:
+        on = bool((payload or {}).get("paused"))
+    except Exception:
+        return JSONResponse({"ok": False, "error": "参数错误"}, status_code=400)
+    PAUSED["on"] = on
+    print(f"[control] 看板已{'暂停' if on else '恢复'}")
+    return {"ok": True, "paused": on}
+
+
+@app.post("/api/kindle/clear")
+def api_kindle_clear():
+    """一键清屏(设置页「系统向导」按钮):置位清屏指令,Kindle 下一次拉帧(≤拉图间隔)时
+    黑闪清屏、全刷重绘当前帧,随后继续正常轮播。不触碰轮播状态(不清除/重置当前帧)。"""
+    CLEAR_CMD["on"] = True
+    CLEAR_CMD["ts"] = time.time()
+    print("[control] 已下发 Kindle 一键清屏指令")
+    return {"ok": True}
+
+
+@app.post("/api/system/mount-nas")
+def api_system_mount_nas():
+    ok, msg = systemctl.mount_nas()
+    return {"ok": ok, "msg": msg}
+
+
+@app.post("/api/system/setup-usbnet")
+def api_system_setup_usbnet():
+    ok, msg = systemctl.setup_usbnet()
+    return {"ok": ok, "msg": msg}
+
+
+@app.post("/api/system/test-kindle")
+def api_system_test_kindle():
+    return systemctl.test_kindle()
+
+
+@app.post("/api/system/restart-photo")
+def api_system_restart_photo():
+    """重置照片批次状态，下次渲染时重新建批。"""
+    try:
+        from server.render import build_context
+        build_context._photo_state["batch"] = []
+        build_context._photo_state["local_idx"] = 0
+        build_context._photo_building = False
+        return {"ok": True, "msg": "照片服务将在下一轮重新加载"}
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)

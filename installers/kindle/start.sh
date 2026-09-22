@@ -94,6 +94,18 @@ fbink -g file=/mnt/us/frame.png -W GC16 -f
 count=0; fail=0
 while true; do
     sleep "$INTERVAL"
+    # 一键清屏(设置页「系统向导」按钮):读到服务端指令 → 拉最新帧 → 黑闪清屏 → 全刷重绘当前帧 → 继续正常轮播。
+    # 指令读取即复位(每条只执行一次);不碰轮播状态,清完从当前帧继续。
+    if [ "$(curl -s -m 5 "$BASE/kindle/clear-cmd" 2>/dev/null)" = "1" ]; then
+        curl -s -m 10 "$BASE/kindle/frame.png" -o /mnt/us/frame.png
+        if [ -s /mnt/us/frame.png ]; then
+            fbink -c -f >/dev/null 2>&1
+            fbink -g file=/mnt/us/frame.png -W GC16 -f >/dev/null 2>&1
+        fi
+        count=$((count + 1))
+        [ $((count % 3)) -eq 0 ] && report_battery
+        continue
+    fi
     curl -s -m 10 "$BASE/kindle/frame.png" -o /mnt/us/frame_new.png
     if [ -s /mnt/us/frame_new.png ]; then
         mv /mnt/us/frame_new.png /mnt/us/frame.png

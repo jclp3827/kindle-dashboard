@@ -54,7 +54,7 @@ def _bin():
 def _env():
     """确保 node 在 PATH(ccusage 是 node 脚本;launchd 环境 PATH 受限,本地 node 要补进去)。"""
     env = dict(os.environ)
-    extra = [os.path.join(REPO, ".node", "bin"), "/usr/local/bin", "/opt/homebrew/bin"]
+    extra = [os.path.join(REPO, ".node", "bin"), os.path.expanduser("~/bin"), "/usr/local/bin", "/opt/homebrew/bin"]
     env["PATH"] = os.pathsep.join(extra) + os.pathsep + env.get("PATH", "")
     return env
 

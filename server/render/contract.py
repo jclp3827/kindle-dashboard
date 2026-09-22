@@ -25,6 +25,7 @@ PAGES = {
     "printer": {"title": "打印机", "section": "printer", "needs": ["printer"]},
     "news":    {"title": "资讯",   "section": "news",    "needs": ["news"]},
     "download":{"title": "下载",   "section": "download","needs": ["downloaders"]},
+    "photo":   {"title": "相册",   "section": "photo",    "needs": ["photo"]},
     "music":   {"title": "音乐",   "section": "music",   "needs": ["music"]},
 }
 

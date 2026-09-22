@@ -79,7 +79,7 @@ def main():
             data = fetch_usage(d)
             rl = data.get("rate_limit", {})
             p = rl.get("primary_window", {})
-            s = rl.get("secondary_window", {})
+            s = rl.get("secondary_window") or {}
             print(json.dumps({
                 "primary": {"usedPercent": p.get("used_percent", 0),
                             "resetsAt": p.get("reset_at", 0)},

@@ -62,7 +62,9 @@ def collect(cfg: dict):
     params = {"location": loc, "key": key}
     headers = {"Accept-Encoding": "gzip"}
     try:
-        with httpx.Client(timeout=10) as c:
+        import os as _os
+        px = _os.environ.get("https_proxy") or _os.environ.get("HTTPS_PROXY") or ""
+        with httpx.Client(timeout=10, proxy=px or None) as c:
             nd = c.get(f"{base}/weather/now", params=params, headers=headers).json()
             dd = c.get(f"{base}/weather/3d", params=params, headers=headers).json()
     except Exception as e:

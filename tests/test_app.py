@@ -45,6 +45,23 @@ def test_auth_token_protects_management_apis():
         cm.get()["server"]["access_token"] = ""    # 清掉,不影响其他测试(空=放行)
 
 
+def test_kindle_clear_cmd_flow():
+    """一键清屏:设置页下发(需令牌)→ Kindle 轮询读到 1(豁免令牌)且读后复位 → 再读为 0。"""
+    from server.app import CLEAR_CMD
+    CLEAR_CMD["on"] = False
+    cm.get()["server"]["access_token"] = "T0KEN"
+    try:
+        assert client.get("/kindle/clear-cmd").text == "0"                        # 无指令
+        assert client.post("/api/kindle/clear").status_code == 401                # 下发需令牌
+        r = client.post("/api/kindle/clear", headers={"X-Access-Token": "T0KEN"})
+        assert r.status_code == 200 and r.json().get("ok") is True
+        assert client.get("/kindle/clear-cmd").text == "1"                        # Kindle 读到指令(豁免)
+        assert client.get("/kindle/clear-cmd").text == "0"                        # 读后复位,只执行一次
+    finally:
+        CLEAR_CMD["on"] = False
+        cm.get()["server"]["access_token"] = ""
+
+
 def test_music_artwork_cache_and_pause_idle_wall():
     """Music 推送:封面进缓存;paused 的 state_since 不被心跳刷新;暂停超时/停播出封面墙。"""
     from datetime import datetime, timezone

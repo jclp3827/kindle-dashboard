@@ -43,6 +43,28 @@
   .secnote{background:#fffbeb;border:1px solid #fde68a;color:#92400e;font-size:12px;border-radius:8px;padding:8px 12px;margin-bottom:14px;}
   .errbox{background:#fef2f2;border:1px solid #fecaca;color:var(--err);font-size:12px;border-radius:8px;padding:8px 12px;margin-bottom:14px;white-space:pre-line;display:none;}
   .add-disc{font-size:12px;color:var(--ink2);margin-top:8px;}
+  .wizard{margin-bottom:14px;}
+  .wizard h2{display:flex;align-items:center;gap:8px;}
+  .wizard .wstep{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:8px;background:#fafaf9;}
+  .wizard .wstep .st-head{display:flex;align-items:center;justify-content:space-between;gap:8px;}
+  .wizard .wstep .st-title{font-weight:600;font-size:13px;display:flex;align-items:center;gap:7px;}
+  .wizard .dot{width:9px;height:9px;border-radius:50%;display:inline-block;background:#d1d5db;flex:none;}
+  .wizard .dot.ok{background:#16a34a;}
+  .wizard .dot.bad{background:#dc2626;}
+  .wizard .dot.wait{background:#f59e0b;}
+  .wizard .st-detail{font-size:12px;color:var(--ink2);margin-top:5px;line-height:1.5;}
+  .wizard button{font-size:12px;padding:5px 11px;border-radius:8px;border:1px solid var(--line);background:#fff;cursor:pointer;white-space:nowrap;}
+  .wizard button.primary{background:var(--accent);color:#fff;border-color:var(--accent);}
+  .wizard button:disabled{opacity:.5;cursor:default;}
+  .wizard .src-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:4px 10px;font-size:12px;margin-top:6px;}
+  .wizard .src-item{display:flex;align-items:center;gap:6px;}
+  .wizard .wtop{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;}
+  .wizard .wtop .help{margin:0;}
+  .wizard .wmsg{font-size:12px;margin-top:6px;padding:6px 9px;border-radius:7px;display:none;}
+  .wizard .wmsg.show{display:block;}
+  .wizard .wmsg.ok{background:#dcfce7;color:#15803d;}
+  .wizard .wmsg.err{background:#fef2f2;color:#b91c1c;}
+  .wizard .wmsg.info{background:#eff6ff;color:#1d4ed8;}
   .add-disc a{color:#2563eb;cursor:pointer;margin-right:10px;}
 </style>
 </head>
@@ -64,6 +86,55 @@
     <div id="form-body"></div>
   </div>
   <div class="preview">
+    <div class="card wizard" id="wizard">
+      <div class="wtop">
+        <h2 style="margin:0;">系统向导</h2>
+        <button onclick="sysCheck()">重新检测</button>
+      </div>
+      <div class="help" style="margin:0 0 8px;">按顺序完成下列步骤，Kindle 即可正常显示。</div>
+
+      <div class="wstep" id="ws-nas">
+        <div class="st-head">
+          <div class="st-title"><span class="dot" id="dot-nas"></span>① NAS 照片库</div>
+          <button id="btn-nas" onclick="sysMountNas()">挂载 NAS</button>
+        </div>
+        <div class="st-detail" id="detail-nas">检测中…</div>
+      </div>
+
+      <div class="wstep" id="ws-usb">
+        <div class="st-head">
+          <div class="st-title"><span class="dot" id="dot-usb"></span>② USB 网络（Kindle）</div>
+          <button id="btn-usb" onclick="sysSetupUsb()">配置 USB 网络</button>
+        </div>
+        <div class="st-detail" id="detail-usb">检测中…</div>
+      </div>
+
+      <div class="wstep" id="ws-kindle">
+        <div class="st-head">
+          <div class="st-title"><span class="dot" id="dot-kindle"></span>③ Kindle 推送</div>
+          <div style="display:flex;gap:6px;">
+            <button id="btn-clear" onclick="sysClearScreen()">一键清屏</button>
+            <button id="btn-kindle" onclick="sysTestKindle()">检测连接</button>
+          </div>
+        </div>
+        <div class="st-detail" id="detail-kindle">检测中…</div>
+      </div>
+
+      <div class="wstep" id="ws-photo">
+        <div class="st-head">
+          <div class="st-title"><span class="dot" id="dot-photo"></span>④ 照片缓存</div>
+          <button id="btn-photo" onclick="sysRestartPhoto()">重新加载</button>
+        </div>
+        <div class="st-detail" id="detail-photo">检测中…</div>
+      </div>
+
+      <div class="wstep">
+        <div class="st-title" style="font-size:13px;">数据源</div>
+        <div class="src-grid" id="src-grid"></div>
+      </div>
+
+      <div class="wmsg" id="wmsg"></div>
+    </div>
     <div class="card">
       <h2 id="prev-title">实时预览</h2>
       <div class="help" id="prev-help">所见即所得 —— 切风格立即变;改配置点「保存」后刷新。</div>
@@ -123,6 +194,14 @@ const I18N={
     rem_tip_on:'已启用。卸载:',
     rem_copy:'复制', rem_copied:'已复制',
     rem_foot:'仅 macOS。脚本装到 <code>~/.kindle-dashboard/</code>,launchd 开机自启。',
+    // 本机内部采集（已取代外部 launchd 推送脚本）
+    internal_badge:'本机内部采集',
+    internal_auto:'由看板服务在本机直接读取，无需终端安装、无需 launchd 后台项。',
+    internal_auth:'首次启用时若弹出授权，请在「系统设置 → 隐私与安全性 → 自动化」里允许。',
+    internal_rem:'由看板服务在本机直接读取「提醒事项」。',
+    internal_music:'由看板服务在本机直接读取「音乐」当前播放。',
+    internal_ccusage:'由看板服务在本机直接运行 ccusage 读取 Claude/Codex 用量。',
+    internal_quota:'由看板服务在本机定时调用官方额度接口获取 5 小时 / 周额度。',
     // ccusage push — AI 用量统计(今天花了多少 token / 多少钱)
     ccu_tip_off:'<b>AI 用量统计</b>(统计 Claude/Codex 花了多少 token 和钱)—— 在装了 Claude Code 或 Codex 的 Mac/Linux 上执行(需先装 ccusage: <code>npm i -g ccusage</code>):',
     ccu_tip_on:'<b>AI 用量统计</b> 已启用。在其他设备上也装:',
@@ -193,6 +272,13 @@ const I18N={
     rem_tip_on:'Enabled. Uninstall:',
     rem_copy:'Copy', rem_copied:'Copied',
     rem_foot:'macOS only. Scripts installed to <code>~/.kindle-dashboard/</code>, launchd auto-starts on login.',
+    internal_badge:'Built-in local collection',
+    internal_auto:'Read directly by the dashboard service on this Mac — no terminal install or launchd agent needed.',
+    internal_auth:'On first use, allow it under System Settings → Privacy & Security → Automation if prompted.',
+    internal_rem:'Reminders are read directly on this Mac by the dashboard service.',
+    internal_music:'Music now-playing is read directly on this Mac by the dashboard service.',
+    internal_ccusage:'Usage is read by running ccusage locally inside the dashboard service.',
+    internal_quota:'Quota is fetched from the official API on a schedule inside the dashboard service.',
     ccu_tip_off:'<b>AI Usage Stats</b> (track token/cost consumption) — run on the Mac/Linux where Claude Code or Codex is installed (requires ccusage: <code>npm i -g ccusage</code>):',
     ccu_tip_on:'<b>AI Usage Stats</b> enabled. Install on another device too:',
     ccu_tip_uninstall:'Uninstall:',
@@ -234,8 +320,8 @@ const I18N={
 const t=k=>(I18N[LANG]||I18N.zh)[k] ?? (I18N.zh[k] ?? k);
 
 const PAGE_LABELS_MAP={
-  zh:{home:'首页',ai:'AI 用量',news:'资讯',music:'音乐',download:'下载',device:'设备监控',ha:'智能家居',printer:'3D 打印机'},
-  en:{home:'Home',ai:'AI Usage',news:'News',music:'Music',download:'Downloads',device:'Devices',ha:'Smart Home',printer:'3D Printer'}
+  zh:{home:'首页',ai:'AI 用量',news:'资讯',music:'音乐',download:'下载',device:'设备监控',ha:'智能家居',printer:'3D 打印机',photo:'电子相册'},
+  en:{home:'Home',ai:'AI Usage',news:'News',music:'Music',download:'Downloads',device:'Devices',ha:'Smart Home',printer:'3D Printer',photo:'Gallery'}
 };
 const STYLE_LABELS_MAP={
   zh:{style_a:'经典仪表盘',bento:'卡片分区',blueprint:'蓝图线框',gauge:'仪表盘',minimal:'极简',newspaper:'报纸',terminal:'终端'},
@@ -313,10 +399,10 @@ function renderForm(){
     // devices/ha_page 用自定义列表控件,其标量字段(如 devices.interval)在列表后补渲染
     if(sec.key==='devices'||sec.key==='ha_page')
       for(const f of sec.fields){ if(f.type!=='module_list'){ const n=renderField(sec.key,f); if(n) c.appendChild(n); } }
-    if(sec.key==='reminders') c.appendChild(renderReminderCmd());
+    if(sec.key==='reminders') c.appendChild(internalCollectBox('internal_rem'));
     if(sec.key==='mstodo') c.appendChild(renderMstodo());
-    if(sec.key==='ai_usage'){ c.appendChild(renderCcusagePushCmd()); c.appendChild(renderQuotaPushCmd()); }
-    if(sec.key==='music') c.appendChild(renderMusicPushCmd());
+    if(sec.key==='ai_usage'){ c.appendChild(internalCollectBox('internal_ccusage')); c.appendChild(internalCollectBox('internal_quota')); }
+    if(sec.key==='music') c.appendChild(internalCollectBox('internal_music'));
     if(sec.key==='server'){ c.appendChild(kindleFlashBox()); c.appendChild(renderAppQR()); }
     root.appendChild(c);
   }
@@ -597,6 +683,19 @@ function renderMstodo(){
 
 // 公共:生成"说明 + 命令框 + 复制按钮 + 注脚"的 push 命令块
 // 已启用时同时显示安装命令(其他设备也要装)和卸载命令
+function internalCollectBox(descKey){
+  const d=document.createElement('div');
+  d.style.cssText='margin-top:14px;border-top:1px dashed var(--line);padding-top:12px;';
+  d.innerHTML=`<div style="display:flex;gap:8px;align-items:flex-start;background:#eef7ef;border:1px solid #bfe3c2;border-radius:8px;padding:10px 12px;">
+    <span style="font-size:14px;line-height:1.4;">✅</span>
+    <div style="font-size:12px;color:#2c5f33;line-height:1.6;">
+      <div><b>${h(t('internal_badge'))}</b> · ${t(descKey)}</div>
+      <div style="margin-top:3px;color:#4a7a52;">${t('internal_auto')}</div>
+      <div style="margin-top:3px;color:#4a7a52;">${t('internal_auth')}</div>
+    </div>
+  </div>`;
+  return d;
+}
 function macPushCmdBox(opts){
   // opts: {tipOff, tipOn, tipUninstall, foot, installCmd, uninstallCmd, enabled}
   const d=document.createElement('div');
@@ -1113,7 +1212,114 @@ function refreshPreview(){
   })();
 }
 
+// ---------- 系统向导 ----------
+function setDot(id, cls){ const el=document.getElementById(id); if(el) el.className='dot '+cls; }
+function setDetail(id, txt){ const el=document.getElementById(id); if(el) el.textContent=txt; }
+function wMsg(txt, cls){
+  const m=document.getElementById('wmsg');
+  if(!txt){ m.className='wmsg'; m.textContent=''; return; }
+  m.className='wmsg show '+(cls||'info'); m.textContent=txt;
+}
+async function sysApi(path, opts){
+  const r=await fetch(path, Object.assign({headers:{'X-Access-Token':KD_TOKEN}}, opts||{}));
+  try{ return await r.json(); }catch(e){ return {ok:false, error:'HTTP '+r.status}; }
+}
+async function sysCheck(){
+  const s=await sysApi('/api/system/status');
+  if(!s || s.ok===false){ wMsg('状态检测失败：'+(s&&s.error||'服务无响应'),'err'); return; }
+  // NAS
+  if(s.nas.mounted){
+    setDot('dot-nas','ok');
+    setDetail('dot-nas','');
+    var cntTxt = s.nas.counting ? '正在统计照片数…' : '共 '+s.nas.photo_count.toLocaleString()+' 张照片';
+    setDetail('detail-nas','已挂载 '+s.nas.mount+'，'+cntTxt);
+    document.getElementById('btn-nas').textContent='重新挂载';
+  }else{
+    setDot('dot-nas', s.nas.host_reachable?'wait':'bad');
+    setDetail('detail-nas', s.nas.host_reachable?'NAS 在线但未挂载，点右侧挂载':'NAS 不在线（请确认 NAS 已开机）');
+    document.getElementById('btn-nas').textContent='挂载 NAS';
+  }
+  // USB
+  if(!s.usbnet.exists){
+    setDot('dot-usb','bad');
+    setDetail('detail-usb','未检测到 en11 网卡（Kindle 未插或未开 USBNetwork）');
+  }else if(s.usbnet.configured){
+    setDot('dot-usb','ok');
+    setDetail('detail-usb','en11 已配置 '+s.usbnet.ip);
+  }else{
+    setDot('dot-usb','wait');
+    setDetail('detail-usb','en11 存在但未配置（当前 '+(s.usbnet.ip||'无IP')+'），点右侧授权配置');
+  }
+  // Kindle（以"正在拉帧"为最可靠信号）
+  if(s.kindle.pulling){
+    setDot('dot-kindle','ok');
+    setDetail('detail-kindle','已连接，Kindle 正在拉取画面（'+(s.kindle.pull_ago!=null?s.kindle.pull_ago+' 秒前':'')+'）');
+  }else if(s.kindle.ping && s.kindle.ssh){
+    if(s.kindle.loop===false){ setDot('dot-kindle','wait'); setDetail('detail-kindle','SSH 正常，推送脚本未运行（点检测可启动）'); }
+    else { setDot('dot-kindle','wait'); setDetail('detail-kindle','已连接，但未在拉帧（点检测连接）'); }
+  }else if(!s.usbnet.configured){
+    setDot('dot-kindle','bad'); setDetail('detail-kindle','等待 ② USB 网络配置');
+  }else{
+    setDot('dot-kindle','bad'); setDetail('detail-kindle','Kindle 不可达（'+s.kindle.ssh_err+'）');
+  }
+  // 照片缓存
+  if(s.photo.cache_count>=10){
+    setDot('dot-photo','ok');
+    setDetail('detail-photo','本地缓存 '+s.photo.cache_count+' 张，进度 '+s.photo.photo_idx+'（NAS 关机时循环播放）');
+  }else{
+    setDot('dot-photo','wait');
+    setDetail('detail-photo','缓存不足（'+s.photo.cache_count+' 张），挂载 NAS 后自动加载');
+  }
+  // 数据源
+  const labels={weather:'天气',ccusage:'AI用量',codex_quota:'Codex额度',music:'音乐',reminders:'提醒',news:'资讯'};
+  const grid=document.getElementById('src-grid'); grid.innerHTML='';
+  Object.keys(labels).forEach(k=>{
+    const d=document.createElement('div'); d.className='src-item';
+    d.innerHTML='<span class="dot '+(s.sources[k]?'ok':'bad')+'"></span>'+labels[k];
+    grid.appendChild(d);
+  });
+}
+async function sysMountNas(){
+  const btn=document.getElementById('btn-nas'); btn.disabled=true; const old=btn.textContent; btn.textContent='挂载中…';
+  wMsg('正在挂载 NAS…','info');
+  const r=await sysApi('/api/system/mount-nas',{method:'POST'});
+  btn.disabled=false; btn.textContent=old;
+  wMsg(r.msg, r.ok?'ok':'err');
+  sysCheck();
+}
+async function sysSetupUsb(){
+  const btn=document.getElementById('btn-usb'); btn.disabled=true; btn.textContent='等待授权…';
+  wMsg('请在弹出的系统窗口输入开机密码以配置 USB 网络','info');
+  const r=await sysApi('/api/system/setup-usbnet',{method:'POST'});
+  btn.disabled=false; btn.textContent='配置 USB 网络';
+  wMsg(r.msg, r.ok?'ok':'err');
+  sysCheck();
+}
+async function sysTestKindle(){
+  const btn=document.getElementById('btn-kindle'); btn.disabled=true; btn.textContent='检测中…';
+  const r=await sysApi('/api/system/test-kindle',{method:'POST'});
+  btn.disabled=false; btn.textContent='检测连接';
+  wMsg(r.msg, r.ok?'ok':'err');
+  sysCheck();
+}
+async function sysClearScreen(){
+  const btn=document.getElementById('btn-clear'); btn.disabled=true; const old=btn.textContent; btn.textContent='清屏中…';
+  wMsg('正在给 Kindle 下发清屏指令…','info');
+  const r=await sysApi('/api/kindle/clear',{method:'POST'});
+  btn.disabled=false; btn.textContent=old;
+  wMsg(r.ok?'已下发，Kindle 将在下一次拉帧时清屏并继续轮播':'清屏指令下发失败：'+(r&&r.error||''), r.ok?'ok':'err');
+}
+async function sysRestartPhoto(){
+  const btn=document.getElementById('btn-photo'); btn.disabled=true; btn.textContent='重新加载中…';
+  const r=await sysApi('/api/system/restart-photo',{method:'POST'});
+  btn.disabled=false; btn.textContent='重新加载';
+  wMsg(r.msg||r.error, r.ok?'ok':'err');
+  setTimeout(sysCheck, 3000);
+}
+
 init();
+sysCheck();
+setInterval(sysCheck, 15000);
 </script>
 </body>
 </html>

@@ -351,6 +351,166 @@ def build_calendar(today, lang="zh"):
     return out
 
 
+
+_photo_state = {"idx": 0, "batch": [], "batch_time": 0, "path": "", "photo_idx": 0, "local_idx": 0, "batch_start": 0}
+# Load persisted photo_idx
+try:
+    import os as _os, json as _json
+    _p = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))), "data", "photo_state.json")
+    if _os.path.exists(_p):
+        d = _json.load(open(_p))
+        _photo_state["photo_idx"] = d.get("photo_idx", d.get("batch_idx", 0))
+except Exception as _e:
+    print(f"[photo] load state error: {_e}")
+
+def _refresh_photo_batch(cfg, start_idx=None):
+    """从NAS预取一批照片，处理好存本地缓存目录。按实际消耗位置推进，不跳图。"""
+    import os, subprocess, time
+    from PIL import Image, ImageOps
+    pcfg = (cfg or {}).get("photo", {}) or {}
+    path = pcfg.get("path", "")
+    gray = pcfg.get("grayscale", True)
+    if not path:
+        return
+    SKIP = {"_重复待确认", "#recycle", ".DS_Store"}
+    cache_dir = os.path.expanduser("~/kindle-photo-cache")
+    os.makedirs(cache_dir, exist_ok=True)
+
+    # 收集文件列表（NAS不可达时保留旧列表，不清空）
+    need_scan = (
+        _photo_state.get("files") is None
+        or _photo_state.get("files_mtime", 0) < time.time() - 600
+        or _photo_state.get("path") != path
+    )
+    if need_scan:
+        EXTS = {".jpg",".jpeg",".png",".nef"}
+        files = []
+        if os.path.isdir(path):
+            try:
+                for root, dirs, names in os.walk(path, timeout=10):
+                    dirs[:] = [d for d in dirs if d not in SKIP and not d.startswith(".")]
+                    for n in names:
+                        if os.path.splitext(n)[1].lower() in EXTS:
+                            files.append(os.path.join(root, n))
+            except Exception:
+                pass
+        files.sort()
+        if files:
+            _photo_state["files"] = files
+            _photo_state["files_mtime"] = time.time()
+            _photo_state["path"] = path
+        elif _photo_state.get("files"):
+            # NAS不可达，保留旧列表
+            pass
+        else:
+            return
+    files = _photo_state["files"]
+    if not files:
+        return
+
+    BATCH = 180
+    if start_idx is None:
+        start_idx = _photo_state.get("photo_idx", 0)
+    start_idx = start_idx % len(files)
+    batch = []
+    tw, th = 1024, 758
+    for i in range(BATCH):
+        src = files[(start_idx + i) % len(files)]
+        try:
+            out = os.path.join(cache_dir, f"p_{i:04d}.png")
+            if src.lower().endswith(".nef"):
+                subprocess.run(["sips","-s","format","jpeg","--resampleHeightWidthMax","2048",src,"--out",os.path.join(cache_dir, "nef_tmp.jpg")], check=True, capture_output=True)
+                src2 = os.path.join(cache_dir, "nef_tmp.jpg")
+            else:
+                src2 = src
+            im = Image.open(src2)
+            im = ImageOps.exif_transpose(im)
+            im = im.convert("L" if gray else "RGB")
+            sr = im.width/im.height; tr = tw/th
+            if sr > tr: nw,nh = tw, round(im.height*tw/im.width)
+            else: nh,nw = th, round(im.width*th/im.height)
+            im = im.resize((nw,nh), Image.LANCZOS)
+            canvas = Image.new("L" if gray else "RGB", (tw,th), 255)
+            canvas.paste(im, ((tw-nw)//2, (th-nh)//2))
+            canvas.save(out, "PNG")
+            batch.append(out)
+        except:
+            pass
+    _photo_state["batch"] = batch
+    _photo_state["batch_start"] = start_idx
+    _photo_state["photo_idx"] = start_idx
+    _photo_state["batch_time"] = time.time()
+    _photo_state["local_idx"] = 0
+    _save_photo_state()
+
+
+def _save_photo_state():
+    """持久化照片进度。"""
+    import os, json
+    try:
+        pdir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data")
+        os.makedirs(pdir, exist_ok=True)
+        with open(os.path.join(pdir, "photo_state.json"), "w") as f:
+            json.dump({"photo_idx": _photo_state.get("photo_idx", 0)}, f)
+    except Exception as e:
+        print(f"[photo] save state error: {e}")
+
+
+_photo_building = False
+
+def _build_photo(cfg):
+    """从本地缓存读照片，不碰NAS。按实际消耗推进，用完前预取，不跳图。"""
+    import base64, os, time, threading, glob
+    global _photo_building
+    # 重启后快速恢复：磁盘上有缓存就直接用
+    if not _photo_state["batch"]:
+        cached = sorted(glob.glob(os.path.expanduser("~/kindle-photo-cache/p_*.png")))
+        if len(cached) >= 10:
+            _photo_state["batch"] = cached
+            _photo_state["local_idx"] = 0
+            _photo_state["batch_time"] = time.time()
+            _photo_state["batch_start"] = _photo_state.get("photo_idx", 0)
+    if not _photo_state["batch"]:
+        # 首次需要建批
+        if not _photo_building:
+            _photo_building = True
+            def _bg():
+                global _photo_building
+                try: _refresh_photo_batch(cfg)
+                except Exception as e: print(f"[photo] batch build error: {e}")
+                finally: _photo_building = False
+            threading.Thread(target=_bg, daemon=True).start()
+        return {"data": "", "caption": "加载中..."}
+    batch = _photo_state["batch"]
+    local = _photo_state.get("local_idx", 0)
+    # 用到80%时预取下一批（NAS不可达则跳过，循环播放缓存）
+    import os as _os
+    photo_path = (cfg or {}).get("photo", {}).get("path", "")
+    nas_ok = _os.path.isdir(photo_path)
+    if nas_ok and local >= len(batch) * 0.8 and not _photo_building:
+        _photo_building = True
+        next_start = _photo_state.get("batch_start", 0) + local
+        def _bg():
+            global _photo_building
+            try: _refresh_photo_batch(cfg, next_start)
+            except Exception as e: print(f"[photo] batch build error: {e}")
+            finally: _photo_building = False
+        threading.Thread(target=_bg, daemon=True).start()
+    # 批次用完但新批还没好，循环用旧批（不黑屏）
+    idx = local % len(batch)
+    _photo_state["local_idx"] = local + 1
+    _photo_state["photo_idx"] = _photo_state.get("batch_start", 0) + local
+    # 每10张持久化一次
+    if local % 10 == 0:
+        _save_photo_state()
+    try:
+        with open(batch[idx], "rb") as f:
+            data = base64.b64encode(f.read()).decode()
+        return {"data": data, "caption": os.path.basename(batch[idx])}
+    except Exception as e:
+        return {"data": "", "caption": str(e)}
+
+
 def prep_context(now, cache, cfg=None):
     today = now.date()
     lang = ((cfg or {}).get("server", {}) or {}).get("language", "zh")
@@ -742,6 +902,7 @@ def prep_context(now, cache, cfg=None):
         "ha": cache.get("ha") or {"cards": []},   # 采集失败/未配 → 空墙(诚实降级,该页隐藏)
         "printer": printer,
         "news": news,
+        "photo": _build_photo(cfg),
         "download": download,
         "music": music,
     }
