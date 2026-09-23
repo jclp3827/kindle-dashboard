@@ -1242,13 +1242,13 @@ async function sysCheck(){
   // USB
   if(!s.usbnet.exists){
     setDot('dot-usb','bad');
-    setDetail('detail-usb','未检测到 en11 网卡（Kindle 未插或未开 USBNetwork）');
+    setDetail('detail-usb','未检测到 USB 网卡'+(s.usbnet.iface?'（'+s.usbnet.iface+' 不存在）':'')+'（Kindle 未插或未开 USBNetwork）');
   }else if(s.usbnet.configured){
     setDot('dot-usb','ok');
-    setDetail('detail-usb','en11 已配置 '+s.usbnet.ip);
+    setDetail('detail-usb','USB 网卡 '+s.usbnet.iface+' 已配置 '+s.usbnet.ip);
   }else{
     setDot('dot-usb','wait');
-    setDetail('detail-usb','en11 存在但未配置（当前 '+(s.usbnet.ip||'无IP')+'），点右侧授权配置');
+    setDetail('detail-usb','USB 网卡 '+s.usbnet.iface+' 存在但未配置（当前 '+(s.usbnet.ip||'无IP')+'），点右侧授权配置');
   }
   // Kindle（以"正在拉帧"为最可靠信号）
   if(s.kindle.pulling){

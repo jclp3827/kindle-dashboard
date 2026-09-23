@@ -69,11 +69,44 @@ def _mounted():
     return r is not None and "摄影图片" in r.stdout
 
 
-def _en11_info():
-    """返回 USB 网卡 en11 状态。"""
-    r = _run(["/sbin/ifconfig", "en11"], timeout=5)
+def _usb_iface():
+    """自动检测 Kindle USB 网络接口名（RNDIS）。
+
+    Time Machine 迁移/换机后接口名会变（旧机 en11，新机可能是 en8/en9…），
+    不能硬编码。优先从 networksetup 硬件端口解析含 RNDIS/USB 的 Device，
+    找不到再回退 en11（兼容旧机器）。
+    """
+    r = _run(["/usr/sbin/networksetup", "-listallhardwareports"], timeout=5)
+    if r is not None and r.returncode == 0:
+        # 第一优先：RNDIS 端口（Kindle USB 网络在 macOS 上显示为 RNDIS/Ethernet Gadget）
+        port = ""
+        for line in r.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("Hardware Port:"):
+                port = line.split(":", 1)[1].strip()
+            elif line.startswith("Device:"):
+                dev = line.split(":", 1)[1].strip()
+                if "RNDIS" in port and dev.startswith("en"):
+                    return dev
+        # 第二优先：USB 端口（排除 Thunderbolt 网桥等）
+        port = ""
+        for line in r.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("Hardware Port:"):
+                port = line.split(":", 1)[1].strip()
+            elif line.startswith("Device:"):
+                dev = line.split(":", 1)[1].strip()
+                if "USB" in port and "Thunderbolt" not in port and dev.startswith("en"):
+                    return dev
+    return "en11"   # 兼容旧机器/旧行为
+
+
+def _usbnet_info():
+    """返回 USB 网络接口（RNDIS）状态，iface 为实际接口名。"""
+    iface = _usb_iface()
+    r = _run(["/sbin/ifconfig", iface], timeout=5)
     if r is None or r.returncode != 0:
-        return {"exists": False, "ip": "", "configured": False}
+        return {"exists": False, "iface": iface, "ip": "", "configured": False}
     ip = ""
     for line in r.stdout.splitlines():
         if "inet " in line and "inet6" not in line:
@@ -82,6 +115,7 @@ def _en11_info():
                 ip = parts[1]
     return {
         "exists": True,
+        "iface": iface,
         "ip": ip,
         "configured": ip == MAC_USB_IP,
     }
@@ -156,9 +190,9 @@ def status(cfg):
         pass
 
     # USB 网络
-    en11 = _en11_info()
+    usb = _usbnet_info()
     pulling, pull_ago, pull_ip = _pulling()
-    if not en11.get("configured"):
+    if not usb.get("configured"):
         kindle_ping, ssh_ok, ssh_err, loop = False, False, "USB 网络未就绪", None
     else:
         kindle_ping = _ping(KINDLE_IP)
@@ -192,7 +226,7 @@ def status(cfg):
             "counting": _photo_count_cache.get("scanning", False),
             "host_reachable": _ping(NAS_IP),
         },
-        "usbnet": en11,
+        "usbnet": usb,
         "kindle": {
             "ip": KINDLE_IP,
             "ping": kindle_ping,
@@ -238,19 +272,20 @@ def mount_nas():
 
 
 def setup_usbnet():
-    """通过系统授权弹窗配置 en11（需要管理员密码）。返回 (ok, message)。"""
-    en11 = _en11_info()
-    if not en11["exists"]:
-        return False, "未检测到 en11 网卡。请确认 Kindle 已通过 USB 连接、并在 KUAL 中开启 USBNetwork"
-    cmd = f"/sbin/ifconfig en11 inet {MAC_USB_IP} netmask 255.255.255.0 up"
+    """通过系统授权弹窗配置 USB 网络接口（需要管理员密码）。返回 (ok, message)。"""
+    usb = _usbnet_info()
+    if not usb["exists"]:
+        return False, f"未检测到 USB 网卡（{usb['iface']} 不存在）。请确认 Kindle 已通过 USB 连接、并在 KUAL 中开启 USBNetwork"
+    iface = usb["iface"]
+    cmd = f"/sbin/ifconfig {iface} inet {MAC_USB_IP} netmask 255.255.255.0 up"
     osa = f'do shell script "{cmd}" with administrator privileges'
     r = _run(["osascript", "-e", osa], timeout=60)
     if r is not None and r.returncode == 0:
         time.sleep(1)
-        info = _en11_info()
+        info = _usbnet_info()
         if info["configured"]:
-            return True, f"USB 网络已配置（Mac {MAC_USB_IP}）"
-        return False, "授权完成但 en11 未生效"
+            return True, f"USB 网络已配置（{info['iface']} → {MAC_USB_IP}）"
+        return False, f"授权完成但 {iface} 未生效"
     err = (r.stderr or "").strip() if r is not None else "授权超时"
     if "User canceled" in err or "取消" in err:
         return False, "已取消授权"
@@ -259,11 +294,11 @@ def setup_usbnet():
 
 def test_kindle():
     """完整链路检测。优先看是否在拉帧（最可靠），再 USB→ping→SSH→推送脚本。"""
-    en11 = _en11_info()
-    if not en11["exists"]:
-        return {"ok": False, "stage": "en11", "msg": "未检测到 en11，请先配置 USB 网络"}
-    if not en11["configured"]:
-        return {"ok": False, "stage": "en11", "msg": "en11 未配置为 192.168.15.201"}
+    usb = _usbnet_info()
+    if not usb["exists"]:
+        return {"ok": False, "stage": "usbnet", "msg": f"未检测到 USB 网卡（{usb['iface']}），请先配置 USB 网络"}
+    if not usb["configured"]:
+        return {"ok": False, "stage": "usbnet", "msg": f"{usb['iface']} 未配置为 {MAC_USB_IP}"}
     pulling, ago, _ = _pulling()
     if pulling:
         return {"ok": True, "stage": "pulling",
